@@ -18,10 +18,6 @@ SPLUNK_HOME="/opt/splunkforwarder"
 SPLUNK_BIN="$SPLUNK_HOME/bin/splunk"
 SPLUNK_SERVICE="SplunkForwarder"
 SPLUNK_USER="splunk"
-SPLUNK_VERSION="9.3.2"
-SPLUNK_BUILD="d8bb32809498"
-SPLUNK_DEB="splunkforwarder-${SPLUNK_VERSION}-${SPLUNK_BUILD}-linux-amd64.deb"
-SPLUNK_URL="https://download.splunk.com/products/universalforwarder/releases/${SPLUNK_VERSION}/linux/${SPLUNK_DEB}"
 INPUTS_CONF="$SPLUNK_HOME/etc/system/local/inputs.conf"
 LOG_FILE="/var/log/splunk_forwarder_setup.log"
 
@@ -47,6 +43,20 @@ read -rp "Enter Splunk Indexer IP address: " INDEXER_IP
 
 read -rp "Enter Splunk Indexer receiving port [default: 9997]: " INDEXER_PORT
 INDEXER_PORT="${INDEXER_PORT:-9997}"
+
+while true; do
+    read -rp "Enter full path to the Splunk forwarder .deb package: " SPLUNK_DEB_PATH
+    if [[ -z "$SPLUNK_DEB_PATH" ]]; then
+        warn "Package path cannot be empty."
+    elif [[ ! -f "$SPLUNK_DEB_PATH" ]]; then
+        warn "File not found: $SPLUNK_DEB_PATH — please check the path and try again."
+    elif [[ "$SPLUNK_DEB_PATH" != *.deb ]]; then
+        warn "File does not appear to be a .deb package: $SPLUNK_DEB_PATH"
+    else
+        log "Package found: $SPLUNK_DEB_PATH"
+        break
+    fi
+done
 
 while true; do
     read -rsp "Set Splunk admin password for this forwarder: " ADMIN_PASSWORD
@@ -106,19 +116,11 @@ else
 fi
 
 # =============================================================================
-# STEP 2: Download and install
+# STEP 2: Install package
 # =============================================================================
-header "Downloading Splunk Universal Forwarder v${SPLUNK_VERSION}..."
+header "Installing Splunk Universal Forwarder from: ${SPLUNK_DEB_PATH}..."
 
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
-
-cd "$TMPDIR"
-wget -q --show-progress -O "$SPLUNK_DEB" "$SPLUNK_URL" \
-    || error "Failed to download Splunk forwarder from: $SPLUNK_URL\nCheck the version/build string or download manually and update the script."
-
-log "Download complete. Installing package..."
-dpkg -i "$SPLUNK_DEB" || error "dpkg installation failed."
+dpkg -i "$SPLUNK_DEB_PATH" || error "dpkg installation failed. Verify the package is a valid Splunk Universal Forwarder .deb for amd64."
 log "Package installed successfully."
 
 # =============================================================================
