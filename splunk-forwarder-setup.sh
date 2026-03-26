@@ -171,13 +171,18 @@ log "user-seed.conf written."
 # of the CLI on subsequent steps.
 # =============================================================================
 header "First boot: initializing Splunk and creating admin user..."
-log "This may take up to 30 seconds..."
+log "Starting Splunk for the first time to generate internal config files and certificates..."
+log "This may take up to 30 seconds — please be patient."
+log "NOTE: Any 'Splunk username/password' prompts you see below are internal Splunk CLI"
+log "      output and do NOT require any input from you. The script handles this automatically."
 
 sudo -u "$SPLUNK_USER" "$SPLUNK_BIN" start --accept-license --answer-yes --no-prompt --seed-passwd "${ADMIN_PASSWORD}" \
     || error "Splunk failed to start during first boot initialization.\nCheck $SPLUNK_HOME/var/log/splunk/splunkd.log for details."
 
 log "First boot complete. Waiting for Splunk to finish initializing..."
+log "(Giving Splunk 10 seconds to finish writing its configuration files...)"
 sleep 10
+log "Initialization wait complete."
 
 # =============================================================================
 # STEP 6: Validate admin user was created with the correct password
@@ -191,31 +196,38 @@ sleep 10
 #      rather than leaving the forwarder running with a default password.
 # =============================================================================
 header "Validating admin user creation..."
+log "Checking that Splunk created its internal 'admin' user account during first boot."
+log "NOTE: This is Splunk's own internal admin account — it is separate from any"
+log "      Linux system user. It is only used to manage this Splunk forwarder locally."
 
 PASSWD_FILE="$SPLUNK_HOME/etc/passwd"
 
 # Check 1: passwd file must exist
+log "Check 1/3: Verifying Splunk passwd file exists at $PASSWD_FILE..."
 if [[ ! -f "$PASSWD_FILE" ]]; then
     error "Splunk passwd file not found at $PASSWD_FILE.\nSplunk did not complete initialization. Check $SPLUNK_HOME/var/log/splunk/splunkd.log for details."
 fi
+log "Check 1/3 passed: passwd file exists."
 
 # Check 2: admin entry must be present
 # Note: Splunk sometimes writes a leading colon in the passwd file (e.g. ":admin:...")
 # The ^:* pattern handles both ":admin:" and "admin:" formats
+log "Check 2/3: Verifying admin user entry exists in passwd file..."
 if ! grep -q "^:*admin:" "$PASSWD_FILE"; then
     error "Admin user entry not found in $PASSWD_FILE.\nSplunk started but did not create the admin user. Check $SPLUNK_HOME/var/log/splunk/splunkd.log for details."
 fi
-
-log "Admin user entry found in passwd file."
+log "Check 2/3 passed: admin user entry found in passwd file."
 
 # Check 3: confirm authentication works with the configured password
-log "Testing authentication with configured password..."
+log "Check 3/3: Testing that the admin account accepts the password you provided..."
+log "(This confirms Splunk picked up --seed-passwd correctly during initialization.)"
 AUTH_TEST=$(sudo -u "$SPLUNK_USER" "$SPLUNK_BIN" status -auth "admin:${ADMIN_PASSWORD}" 2>&1) || true
 if echo "$AUTH_TEST" | grep -qi "failed\|invalid\|Login failed\|disabled"; then
     error "Admin user was created but authentication failed with the configured password.\nThis means --seed-passwd was not picked up during initialization.\nOutput: $AUTH_TEST\nCheck $SPLUNK_HOME/var/log/splunk/splunkd.log for details."
 fi
+log "Check 3/3 passed: authentication test successful."
 
-log "Authentication test passed. Admin user is correctly configured."
+log "All validation checks passed. Splunk admin user is correctly configured."
 
 # =============================================================================
 # STEP 7: Stop Splunk before enabling boot-start
