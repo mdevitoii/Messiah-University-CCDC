@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # Splunk Universal Forwarder - Automated Setup Script
-# Target OS: Ubuntu 24.04
+# Supported OS: Ubuntu 24.04, Fedora 42
 # =============================================================================
 
 set -euo pipefail
@@ -33,6 +33,60 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # =============================================================================
+# OS SELECTION
+# =============================================================================
+# The user selects their OS manually. This determines which package manager
+# to use (dpkg vs rpm), which log group to add the splunk user to
+# (adm vs systemd-journal), and which log files to monitor (Ubuntu and Fedora
+# use different filenames for the same logs).
+# =============================================================================
+header "Operating System Selection"
+echo ""
+echo "  Which OS is this script running on?"
+echo "  1) Ubuntu 24.04"
+echo "  2) Fedora 42"
+echo ""
+
+while true; do
+    read -rp "Enter selection [1 or 2]: " OS_CHOICE
+    case "$OS_CHOICE" in
+        1)
+            ID="ubuntu"
+            OS_FAMILY="debian"
+            PKG_EXTENSION=".deb"
+            # adm group grants read access to /var/log on Ubuntu/Debian
+            LOG_GROUP="adm"
+            # Ubuntu log file paths
+            SYSLOG_PATH="/var/log/syslog"
+            AUTHLOG_PATH="/var/log/auth.log"
+            KERNLOG_PATH="/var/log/kern.log"
+            log "OS selected: Ubuntu 24.04"
+            break
+            ;;
+        2)
+            ID="fedora"
+            OS_FAMILY="rhel"
+            PKG_EXTENSION=".rpm"
+            # systemd-journal group grants read access to /var/log/journal on Fedora/RHEL.
+            # The adm group does not exist by default on Fedora.
+            LOG_GROUP="systemd-journal"
+            # Fedora log file paths (Fedora uses 'messages' instead of 'syslog',
+            # and 'secure' instead of 'auth.log')
+            SYSLOG_PATH="/var/log/messages"
+            AUTHLOG_PATH="/var/log/secure"
+            KERNLOG_PATH="/var/log/kern.log"
+            log "OS selected: Fedora 42"
+            break
+            ;;
+        *)
+            warn "Invalid selection. Please enter 1 for Ubuntu or 2 for Fedora."
+            ;;
+    esac
+done
+
+log "OS family: $OS_FAMILY | Package type: $PKG_EXTENSION | Log group: $LOG_GROUP"
+
+# =============================================================================
 # STEP 0: Collect inputs
 # =============================================================================
 header "Splunk Universal Forwarder Setup"
@@ -44,16 +98,18 @@ read -rp "Enter Splunk Indexer IP address: " INDEXER_IP
 read -rp "Enter Splunk Indexer receiving port [default: 9997]: " INDEXER_PORT
 INDEXER_PORT="${INDEXER_PORT:-9997}"
 
+# Prompt for the package path and validate it matches the expected extension
+# for the detected OS (.deb for Ubuntu, .rpm for Fedora)
 while true; do
-    read -rp "Enter full path to the Splunk forwarder .deb package: " SPLUNK_DEB_PATH
-    if [[ -z "$SPLUNK_DEB_PATH" ]]; then
+    read -rp "Enter full path to the Splunk forwarder ${PKG_EXTENSION} package: " SPLUNK_PKG_PATH
+    if [[ -z "$SPLUNK_PKG_PATH" ]]; then
         warn "Package path cannot be empty."
-    elif [[ ! -f "$SPLUNK_DEB_PATH" ]]; then
-        warn "File not found: $SPLUNK_DEB_PATH — please check the path and try again."
-    elif [[ "$SPLUNK_DEB_PATH" != *.deb ]]; then
-        warn "File does not appear to be a .deb package: $SPLUNK_DEB_PATH"
+    elif [[ ! -f "$SPLUNK_PKG_PATH" ]]; then
+        warn "File not found: $SPLUNK_PKG_PATH — please check the path and try again."
+    elif [[ "$SPLUNK_PKG_PATH" != *"$PKG_EXTENSION" ]]; then
+        warn "File does not appear to be a ${PKG_EXTENSION} package: $SPLUNK_PKG_PATH"
     else
-        log "Package found: $SPLUNK_DEB_PATH"
+        log "Package found: $SPLUNK_PKG_PATH"
         break
     fi
 done
@@ -78,12 +134,23 @@ log "Indexer target: ${INDEXER_IP}:${INDEXER_PORT}"
 # =============================================================================
 # STEP 1: Uninstall existing Splunk forwarder if present
 # =============================================================================
+# Checks for an existing installation using the appropriate package manager
+# for the detected OS, then removes it cleanly before reinstalling.
+# =============================================================================
 header "Checking for existing Splunk installation..."
 
-if dpkg -l splunkforwarder &>/dev/null || [[ -d "$SPLUNK_HOME" ]]; then
+EXISTING_INSTALL=false
+if [[ "$OS_FAMILY" == "debian" ]] && dpkg -l splunkforwarder &>/dev/null; then
+    EXISTING_INSTALL=true
+elif [[ "$OS_FAMILY" == "rhel" ]] && rpm -q splunkforwarder &>/dev/null; then
+    EXISTING_INSTALL=true
+elif [[ -d "$SPLUNK_HOME" ]]; then
+    EXISTING_INSTALL=true
+fi
+
+if [[ "$EXISTING_INSTALL" == true ]]; then
     warn "Existing Splunk installation detected. Reinstalling from scratch..."
 
-    # Stop service if running
     if systemctl is-active --quiet "$SPLUNK_SERVICE" 2>/dev/null; then
         log "Stopping $SPLUNK_SERVICE..."
         systemctl stop "$SPLUNK_SERVICE" || true
@@ -94,19 +161,19 @@ if dpkg -l splunkforwarder &>/dev/null || [[ -d "$SPLUNK_HOME" ]]; then
         systemctl disable "$SPLUNK_SERVICE" || true
     fi
 
-    # Remove systemd unit file if present
     rm -f /etc/systemd/system/SplunkForwarder.service
     systemctl daemon-reload
 
-    # Purge the package
-    if dpkg -l splunkforwarder &>/dev/null; then
-        log "Purging splunkforwarder package..."
+    if [[ "$OS_FAMILY" == "debian" ]] && dpkg -l splunkforwarder &>/dev/null; then
+        log "Purging splunkforwarder package via dpkg..."
         dpkg --purge splunkforwarder || true
+    elif [[ "$OS_FAMILY" == "rhel" ]] && rpm -q splunkforwarder &>/dev/null; then
+        log "Removing splunkforwarder package via rpm..."
+        rpm -e splunkforwarder || true
     fi
 
-    # Remove leftover directory
     if [[ -d "$SPLUNK_HOME" ]]; then
-        log "Removing $SPLUNK_HOME..."
+        log "Removing leftover directory $SPLUNK_HOME..."
         rm -rf "$SPLUNK_HOME"
     fi
 
@@ -118,13 +185,31 @@ fi
 # =============================================================================
 # STEP 2: Install package
 # =============================================================================
-header "Installing Splunk Universal Forwarder from: ${SPLUNK_DEB_PATH}..."
+# Installs the Splunk forwarder package using the appropriate package manager.
+# dpkg is used on Ubuntu/Debian; rpm is used on Fedora/RHEL.
+# =============================================================================
+header "Installing Splunk Universal Forwarder from: ${SPLUNK_PKG_PATH}..."
 
-dpkg -i "$SPLUNK_DEB_PATH" || error "dpkg installation failed. Verify the package is a valid Splunk Universal Forwarder .deb for amd64."
+if [[ "$OS_FAMILY" == "debian" ]]; then
+    dpkg -i "$SPLUNK_PKG_PATH" \
+        || error "dpkg installation failed. Verify the package is a valid Splunk Universal Forwarder .deb for amd64."
+elif [[ "$OS_FAMILY" == "rhel" ]]; then
+    rpm -ivh "$SPLUNK_PKG_PATH" \
+        || error "rpm installation failed. Verify the package is a valid Splunk Universal Forwarder .rpm for x86_64."
+fi
+
 log "Package installed successfully."
 
 # =============================================================================
 # STEP 3: Create splunk system user and fix ownership
+# =============================================================================
+# Creates a dedicated low-privilege 'splunk' system user to run the forwarder.
+# Running Splunk as root is a security risk and is not recommended.
+#
+# The splunk user is also added to the log-reading group for the detected OS:
+#   - Ubuntu: 'adm' group           — grants read access to /var/log files
+#   - Fedora: 'systemd-journal' group — grants read access to journald logs
+# Without this, Splunk cannot read the log files we configure it to monitor.
 # =============================================================================
 header "Configuring splunk user..."
 
@@ -135,10 +220,11 @@ else
     log "User '$SPLUNK_USER' already exists."
 fi
 
-# Add splunk user to adm group so it can read /var/log files
-if getent group adm &>/dev/null; then
-    usermod -aG adm "$SPLUNK_USER"
-    log "Added '$SPLUNK_USER' to adm group (required for /var/log access)."
+if getent group "$LOG_GROUP" &>/dev/null; then
+    usermod -aG "$LOG_GROUP" "$SPLUNK_USER"
+    log "Added '$SPLUNK_USER' to '$LOG_GROUP' group (required for /var/log read access on $ID)."
+else
+    warn "Group '$LOG_GROUP' not found — splunk may not be able to read log files."
 fi
 
 chown -R "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME"
@@ -146,6 +232,10 @@ log "Ownership of $SPLUNK_HOME set to $SPLUNK_USER."
 
 # =============================================================================
 # STEP 4: Seed admin credentials via user-seed.conf
+# =============================================================================
+# Splunk reads user-seed.conf on first boot to create the admin user. We write
+# this file before starting Splunk so the password is set correctly from the
+# start. The file is automatically deleted by Splunk after it is consumed.
 # =============================================================================
 header "Seeding admin credentials..."
 
@@ -232,11 +322,16 @@ log "All validation checks passed. Splunk admin user is correctly configured."
 # =============================================================================
 # STEP 7: Stop Splunk before enabling boot-start
 # =============================================================================
+log "Stopping Splunk before registering systemd boot-start service..."
 sudo -u "$SPLUNK_USER" "$SPLUNK_BIN" stop || true
 sleep 3
 
 # =============================================================================
 # STEP 8: Enable systemd boot-start
+# =============================================================================
+# Registers the Splunk forwarder as a systemd service so it starts
+# automatically on reboot. Uses the -systemd-managed 1 flag which is
+# required on Ubuntu 24.04 and Fedora 42 since both use systemd natively.
 # =============================================================================
 header "Enabling systemd boot-start..."
 
@@ -245,10 +340,13 @@ header "Enabling systemd boot-start..."
 
 systemctl daemon-reload
 systemctl enable "$SPLUNK_SERVICE" || error "Failed to enable $SPLUNK_SERVICE in systemd."
-log "Boot-start enabled."
+log "Boot-start enabled. Splunk will now start automatically on reboot."
 
 # =============================================================================
 # STEP 9: Configure forward server (outputs.conf)
+# =============================================================================
+# Tells the forwarder where to send log data. This points to the Splunk
+# indexer you specified at the start of this script.
 # =============================================================================
 header "Configuring forward server: ${INDEXER_IP}:${INDEXER_PORT}..."
 
@@ -263,29 +361,40 @@ server = ${INDEXER_IP}:${INDEXER_PORT}
 EOF
 
 chown "$SPLUNK_USER:$SPLUNK_USER" "$SPLUNK_HOME/etc/system/local/outputs.conf"
-log "outputs.conf written."
+log "outputs.conf written. Forwarder will send data to ${INDEXER_IP}:${INDEXER_PORT}."
 
 # =============================================================================
 # STEP 10: Configure log monitors (inputs.conf)
 # =============================================================================
+# Tells Splunk which log files to watch and forward to the indexer.
+# Log file paths differ between Ubuntu and Fedora:
+#   Ubuntu: /var/log/syslog, /var/log/auth.log, /var/log/kern.log
+#   Fedora: /var/log/messages, /var/log/secure,  /var/log/kern.log
+# The correct paths were set automatically during OS detection at the top
+# of this script.
+# =============================================================================
 header "Configuring log monitors..."
+log "OS-specific log paths for $ID:"
+log "  System log : $SYSLOG_PATH"
+log "  Auth log   : $AUTHLOG_PATH"
+log "  Kernel log : $KERNLOG_PATH"
 
 cat > "$INPUTS_CONF" <<EOF
-[monitor:///var/log/syslog]
+[monitor://${SYSLOG_PATH}]
 index = main
 sourcetype = syslog
 
-[monitor:///var/log/auth.log]
+[monitor://${AUTHLOG_PATH}]
 index = main
 sourcetype = linux_secure
 
-[monitor:///var/log/kern.log]
+[monitor://${KERNLOG_PATH}]
 index = main
 sourcetype = linux_kern
 EOF
 
 chown "$SPLUNK_USER:$SPLUNK_USER" "$INPUTS_CONF"
-log "inputs.conf written with syslog, auth.log, and kern.log monitors."
+log "inputs.conf written."
 
 # =============================================================================
 # STEP 11: Start the forwarder service
@@ -327,8 +436,9 @@ echo -e "${GREEN}============================================================${N
 echo -e "${GREEN}  Splunk Universal Forwarder setup complete!${NC}"
 echo -e "${GREEN}============================================================${NC}"
 echo ""
+echo -e "  OS detected:   ${CYAN}${ID} ${VERSION_ID}${NC}"
 echo -e "  Indexer:       ${CYAN}${INDEXER_IP}:${INDEXER_PORT}${NC}"
-echo -e "  Monitors:      ${CYAN}/var/log/syslog, auth.log, kern.log${NC}"
+echo -e "  Monitors:      ${CYAN}${SYSLOG_PATH}, ${AUTHLOG_PATH}, ${KERNLOG_PATH}${NC}"
 echo -e "  Service:       ${CYAN}systemctl status $SPLUNK_SERVICE${NC}"
 echo -e "  Splunk logs:   ${CYAN}$SPLUNK_HOME/var/log/splunk/splunkd.log${NC}"
 echo -e "  Setup log:     ${CYAN}$LOG_FILE${NC}"
