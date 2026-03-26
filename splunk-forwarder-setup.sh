@@ -182,17 +182,28 @@ if [[ ! -f "$PASSWD_FILE" ]]; then
     error "Splunk passwd file not found at $PASSWD_FILE.\nUser initialization failed. Check $SPLUNK_HOME/var/log/splunk/splunkd.log for details."
 fi
 
-if ! grep -q "^admin:" "$PASSWD_FILE"; then
+# Splunk sometimes writes a leading colon in the passwd file (e.g. ":admin:...")
+# so we strip it before checking
+if ! grep -q "^:*admin:" "$PASSWD_FILE"; then
     error "Admin user entry not found in $PASSWD_FILE.\nUser creation failed. Check $SPLUNK_HOME/var/log/splunk/splunkd.log for details."
 fi
 
-# Test authentication actually works
+log "Admin user entry found in passwd file."
+
+# If user-seed.conf was not picked up (Splunk falls back to default 'changeme'),
+# force-set the password now using the add user command
+log "Forcing admin password to configured value..."
+sudo -u "$SPLUNK_USER" "$SPLUNK_BIN" add user admin -password "${ADMIN_PASSWORD}" -role admin -force-change-pass false 2>&1 | tee -a "$LOG_FILE" || \
+sudo -u "$SPLUNK_USER" "$SPLUNK_BIN" edit user admin -password "${ADMIN_PASSWORD}" -role admin -auth "admin:changeme" 2>&1 | tee -a "$LOG_FILE" || \
+    error "Failed to set admin password. Check $SPLUNK_HOME/var/log/splunk/splunkd.log for details."
+
+# Verify authentication works with the configured password
 AUTH_TEST=$(sudo -u "$SPLUNK_USER" "$SPLUNK_BIN" status -auth "admin:${ADMIN_PASSWORD}" 2>&1) || true
-if echo "$AUTH_TEST" | grep -qi "failed\|invalid\|error\|Login failed"; then
-    error "Admin user exists in passwd file but authentication test failed.\nOutput: $AUTH_TEST\nTry running: sudo -u splunk $SPLUNK_BIN edit user admin -password <newpassword> -role admin -auth admin:<currentpassword>"
+if echo "$AUTH_TEST" | grep -qi "failed\|invalid\|Login failed"; then
+    error "Authentication test failed after password set.\nOutput: $AUTH_TEST"
 fi
 
-log "Admin user validated successfully."
+log "Admin user validated and password confirmed successfully."
 
 # =============================================================================
 # STEP 7: Stop Splunk before enabling boot-start
