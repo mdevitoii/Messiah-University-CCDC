@@ -2,6 +2,6 @@
 A repository holding scripts utilized within the Mid-Atlantic Collegate Cyber Defense Competition
 
 ---
-## Commands:
+## Usage:
 
-`wget https://raw.githubusercontent.com/mdevitoii/Messiah-University-CCDC/refs/heads/main/splunk-forwarder-setup.sh`
+This repository is to be used within the MACCDC Qualifiers in March 2026. These scripts abide by all of the posted requirements and limitations.
